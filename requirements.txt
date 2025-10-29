@@ -1,8 +1,10 @@
 fastapi
-uvicorn
+uvicorn[standart]
 sqlalchemy
 pydantic
 alembic
 python-dotenv
 aiogram
+psycopg2-binary
 httpx
+python-multipart
