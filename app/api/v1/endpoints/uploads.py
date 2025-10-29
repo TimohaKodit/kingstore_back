@@ -1,65 +1,69 @@
 import os
 import uuid
-from typing import List
+import logging
+from typing import List, Optional
 
 # 💡 НОВЫЙ ИМПОРТ: aiofiles для асинхронной работы с файлами
 import aiofiles 
 from fastapi import APIRouter, File, UploadFile, HTTPException, status, Request
+from fastapi.responses import JSONResponse
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 # --- Конфигурация ---
 # Директория для сохранения загруженных файлов (должна совпадать с main.py)
 UPLOAD_FOLDER = "uploaded_images"
 # Публичный префикс, по которому файлы обслуживаются (должен совпадать с main.py)
-STATIC_BASE_PATH = "static/images"
+# STATIC_BASE_PATH = "static/images" # Нам больше не нужен этот путь в возвращаемом значении
 
 # Убедимся, что папка для загрузки существует
 os.makedirs(UPLOAD_FOLDER, exist_ok=True) 
 # --------------------
 
+# Разрешенные типы файлов и расширения
+ALLOWED_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif'}
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
+
+def check_file_extension(filename: str) -> Optional[str]:
+    """Проверяет расширение файла и возвращает его в нижнем регистре."""
+    if '.' in filename:
+        ext = filename.rsplit('.', 1)[1].lower()
+        if f".{ext}" in ALLOWED_EXTENSIONS:
+            return f".{ext}"
+    return None
+
 
 @router.post("/upload/images/", response_model=List[str], status_code=status.HTTP_201_CREATED)
 async def upload_images(
-    request: Request, # 💡 НОВОЕ: Получаем объект Request для определения базового URL
+    request: Request,
     files: List[UploadFile] = File(..., description="Список файлов изображений для загрузки")
 ):
     """
-    Принимает список файлов, сохраняет их локально асинхронно и возвращает список полных URL-адресов.
+    Принимает список файлов, сохраняет их локально асинхронно и возвращает список уникальных имен файлов.
+    Эти имена файлов будут сохранены в БД как 'image_urls'.
     """
-    uploaded_urls = []
+    uploaded_filenames = [] # 💡 ИЗМЕНЕНИЕ: Теперь храним только имена файлов
     
-    # Максимальное количество файлов для одной загрузки
+    if not files:
+        raise HTTPException(status_code=400, detail="Необходимо загрузить хотя бы один файл.")
+        
     if len(files) > 5:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Максимальное количество файлов для одной загрузки: 5."
+            status_code=status.HTTP_400_BAD_REQUEST, 
+            detail="Максимальное количество файлов для одной загрузки — 5."
         )
 
-    # Получаем базовый URL сервера (например, http://127.0.0.1:8888)
-    base_url = str(request.base_url).rstrip('/')
-
     for file in files:
-        # 1. Проверка расширения (добавлена проверка MIME-типа для надежности)
-        allowed_extensions = {'.jpg', '.jpeg', '.png', '.webp'}
-        ext = os.path.splitext(file.filename)[1].lower()
+        # Проверка размера (хотя UploadFile может быть большим, асинхронная проверка сложна. 
+        # Доверяем фронтенду или проверяем после загрузки, но здесь пока просто проверка расширения)
         
-        if file.content_type and not file.content_type.startswith('image/'):
-             raise HTTPException(
-                status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-                detail=f"Неподдерживаемый MIME-тип файла: {file.content_type}. Ожидается изображение."
+        ext = check_file_extension(file.filename)
+        if not ext:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Недопустимый тип файла: {file.filename}. Разрешены: {', '.join(ALLOWED_EXTENSIONS)}"
             )
-        
-        if ext not in allowed_extensions:
-            # Если бот отправляет фото, расширение может быть пустым.
-            # Если нет расширения, но это фото, мы примем его и добавим .jpg
-            if file.content_type in ["image/jpeg", "image/jpg"] and not ext:
-                ext = ".jpg"
-            else:
-                 raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Недопустимый тип файла: {file.filename}. Разрешены: {', '.join(allowed_extensions)}"
-                )
 
         # 2. Генерируем уникальное имя файла
         unique_filename = f"{uuid.uuid4().hex}{ext}"
@@ -67,27 +71,25 @@ async def upload_images(
 
         # 3. АСИНХРОННО сохраняем файл на диск
         try:
+            # Важно: Сбрасываем указатель файла в начало, если он был прочитан ранее
+            await file.seek(0) 
             # Используем aiofiles для неблокирующей записи
             async with aiofiles.open(file_path, "wb") as buffer:
                 # Читаем из UploadFile по частям асинхронно и записываем
                 while content := await file.read(1024 * 1024):  # Читаем чанками по 1MB
                     await buffer.write(content)
             
-            # 4. Формируем ПОЛНЫЙ публичный URL
-            # Используем базовый URL + публичный путь + имя файла
-            public_url = f"{base_url}/{STATIC_BASE_PATH}/{unique_filename}"
-            uploaded_urls.append(public_url)
+            # 4. Сохраняем ТОЛЬКО имя файла, которое будет добавлено в БД
+            uploaded_filenames.append(unique_filename)
             
         except Exception as e:
-            # Логирование и возврат ошибки
-            print(f"Ошибка сохранения файла {file.filename}: {e}")
+            logger.error(f"Ошибка сохранения файла {file.filename}: {e}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
                 detail=f"Не удалось сохранить файл {file.filename}. Ошибка: {str(e)}"
             )
         finally:
-            # В отличие от синхронного режима, здесь не нужно вручную закрывать file.file
-            # Асинхронный цикл позаботится об этом.
-            pass
+            await file.close() # Закрываем UploadFile
 
-    return uploaded_urls
+    # 💡 ВОЗВРАЩАЕМ СПИСОК ИМЕН ФАЙЛОВ
+    return JSONResponse(content=uploaded_filenames, status_code=status.HTTP_201_CREATED)
