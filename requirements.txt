@@ -8,3 +8,4 @@ aiogram
 psycopg2-binary
 httpx
 python-multipart
+pydantic-settings
