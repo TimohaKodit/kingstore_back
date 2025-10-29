@@ -9,6 +9,9 @@ class Settings(BaseSettings):
     BOT_TOKEN: str
     API_URL: str 
     ADMIN_ID: int 
+    # 💡 НОВАЯ ПЕРЕМЕННАЯ: URL для установки Telegram Webhook
+    # На Railway она будет установлена как публичный домен, например, https://<ваш-проект>.up.railway.app
+    WEBHOOK_URL: str = "" 
 
     class Config:
         env_file = ".env"
